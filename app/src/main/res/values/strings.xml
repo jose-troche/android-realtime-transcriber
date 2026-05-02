@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">Transcriber</string>
+    <string name="status_ready">Ready</string>
+    <string name="button_start">Start</string>
+    <string name="button_stop">Stop</string>
+    <string name="button_copy">Copy</string>
+    <string name="button_new">New</string>
+    <string name="button_delete">Delete</string>
+    <string name="button_select">Select</string>
 </resources>

@@ -10,33 +10,47 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.text.TextUtils;
 import android.text.method.ScrollingMovementMethod;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST_CODE = 42;
+    private static final int CONTROL_BUTTON_TEXT_SP = 13;
 
     private TextView transcriptView;
+    private ScrollView transcriptContainer;
     private TextView statusView;
     private Button micButton;
     private Button copyButton;
     private Button newButton;
     private Button deleteButton;
     private Button selectButton;
+    private View toastOverlay;
     private TranscriptionStore localStore;
 
     private TranscriptionService service;
@@ -74,6 +88,7 @@ public class MainActivity extends Activity {
                     latestTranscript = transcript == null ? "" : transcript;
                     recording = isRecording;
                     transcriptView.setText(latestTranscript);
+                    scrollTranscriptToBottom();
                     statusView.setText(status);
                     updateButtons();
                 }
@@ -118,14 +133,14 @@ public class MainActivity extends Activity {
         localStore = new TranscriptionStore(this);
 
         statusView = new TextView(this);
-        statusView.setText("Ready");
+        statusView.setText(R.string.status_ready);
         statusView.setTextColor(Color.rgb(231, 234, 241));
         statusView.setTextSize(15);
         root.addView(statusView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        ScrollView transcriptContainer = new ScrollView(this);
+        transcriptContainer = new ScrollView(this);
         transcriptContainer.setFillViewport(true);
         transcriptContainer.setBackgroundColor(Color.DKGRAY);
         transcriptContainer.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -155,9 +170,10 @@ public class MainActivity extends Activity {
         controls.setPadding(dp(2), dp(2), dp(2), dp(2));
 
         micButton = new Button(this);
-        micButton.setText("Start");
+        micButton.setText(R.string.button_start);
         micButton.setAllCaps(false);
-        micButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        micButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(micButton, android.R.drawable.ic_btn_speak_now);
         micButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -171,9 +187,10 @@ public class MainActivity extends Activity {
         controls.addView(micButton, buttonParams());
 
         copyButton = new Button(this);
-        copyButton.setText("Copy");
+        copyButton.setText(R.string.button_copy);
         copyButton.setAllCaps(false);
-        copyButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        copyButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(copyButton, android.R.drawable.ic_menu_upload);
         copyButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -183,9 +200,10 @@ public class MainActivity extends Activity {
         controls.addView(copyButton, buttonParams());
 
         newButton = new Button(this);
-        newButton.setText("New");
+        newButton.setText(R.string.button_new);
         newButton.setAllCaps(false);
-        newButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        newButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(newButton, android.R.drawable.ic_menu_add);
         newButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -196,9 +214,10 @@ public class MainActivity extends Activity {
 
         // Delete button: removes the current active slot and advances to the next saved slot (or clears)
         deleteButton = new Button(this);
-        deleteButton.setText("Delete");
+        deleteButton.setText(R.string.button_delete);
         deleteButton.setAllCaps(false);
-        deleteButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        deleteButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(deleteButton, android.R.drawable.ic_menu_delete);
         deleteButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -208,10 +227,15 @@ public class MainActivity extends Activity {
                         .setPositiveButton("Delete", new android.content.DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(android.content.DialogInterface dialog, int which) {
-                                localStore.deleteActiveSlot();
-                                latestTranscript = localStore.getActiveText();
-                                transcriptView.setText(latestTranscript);
-                                Toast.makeText(MainActivity.this, "Deleted", Toast.LENGTH_SHORT).show();
+                                if (bound && service != null) {
+                                    service.deleteActiveTranscription();
+                                } else {
+                                    localStore.deleteActiveSlot();
+                                    latestTranscript = localStore.getActiveText();
+                                    transcriptView.setText(latestTranscript);
+                                    scrollTranscriptToBottom();
+                                }
+                                showToast("Deleted", Toast.LENGTH_SHORT);
                                 updateButtons();
                             }
                         })
@@ -223,39 +247,93 @@ public class MainActivity extends Activity {
 
         // Select button: when not recording, allows picking any saved transcription
         selectButton = new Button(this);
-        selectButton.setText("Select");
+        selectButton.setText(R.string.button_select);
         selectButton.setAllCaps(false);
-        selectButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        selectButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(selectButton, android.R.drawable.ic_menu_sort_by_size);
         selectButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 // Retrieve non-empty slot indices and show previews. Selecting a slot makes it the active slot
-                final java.util.List<Integer> slots = localStore.getNonEmptySlots();
+                final java.util.List<Integer> slots = localStore.getNonEmptySlotsChronological();
                 if (slots == null || slots.isEmpty()) {
-                    Toast.makeText(MainActivity.this, "No saved transcriptions", Toast.LENGTH_SHORT).show();
+                    showToast("No saved transcriptions", Toast.LENGTH_SHORT);
                     return;
                 }
-                String[] arr = new String[slots.size()];
+                final int activeSlot = localStore.getActiveSlot();
+                final String[] arr = new String[slots.size()];
                 for (int i = 0; i < slots.size(); i++) {
-                    String full = localStore.getTextForSlot(slots.get(i));
-                    arr[i] = previewFor(full);
+                    int slot = slots.get(i);
+                    String full = localStore.getTextForSlot(slot);
+                    arr[i] = selectLabelFor(slot, full);
                 }
-                new AlertDialog.Builder(MainActivity.this)
+                ArrayAdapter<String> adapter = new ArrayAdapter<String>(
+                        MainActivity.this,
+                        android.R.layout.simple_list_item_1,
+                        arr) {
+                    @Override
+                    public View getView(int position, View convertView, ViewGroup parent) {
+                        View view = super.getView(position, convertView, parent);
+                        TextView textView = (TextView) view.findViewById(android.R.id.text1);
+                        boolean isActive = slots.get(position) == activeSlot;
+                        textView.setSingleLine(false);
+                        textView.setMaxLines(2);
+                        textView.setEllipsize(TextUtils.TruncateAt.END);
+                        textView.setTypeface(Typeface.DEFAULT, isActive ? Typeface.BOLD : Typeface.NORMAL);
+                        textView.setTextColor(isActive ? Color.rgb(30, 64, 175) : Color.rgb(31, 41, 55));
+                        textView.setPadding(
+                                textView.getPaddingLeft(),
+                                dp(10),
+                                textView.getPaddingRight(),
+                                dp(10));
+                        view.setBackgroundColor(isActive ? Color.rgb(219, 234, 254) : Color.TRANSPARENT);
+                        return view;
+                    }
+                };
+                final ListView listView = new ListView(MainActivity.this);
+                listView.setAdapter(adapter);
+                listView.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+                listView.setDividerHeight(1);
+                listView.setVerticalScrollBarEnabled(true);
+                int activePosition = slots.indexOf(activeSlot);
+                if (activePosition >= 0) {
+                    listView.setItemChecked(activePosition, true);
+                    listView.setSelection(activePosition);
+                }
+                final int listHeight = Math.min(dp(560), dp(64) * Math.min(slots.size(), 8));
+                final FrameLayout listContainer = new FrameLayout(MainActivity.this);
+                listContainer.setLayoutParams(new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        listHeight));
+                listContainer.addView(listView, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+                final AlertDialog selectDialog = new AlertDialog.Builder(MainActivity.this)
                         .setTitle("Select transcription")
-                        .setItems(arr, new android.content.DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(android.content.DialogInterface dialog, int which) {
-                                int slot = slots.get(which);
-                                // Make the chosen slot active, and load its full text
-                                localStore.setActiveSlot(slot);
-                                String chosen = localStore.getTextForSlot(slot);
-                                latestTranscript = chosen == null ? "" : chosen;
-                                transcriptView.setText(latestTranscript);
-                                updateButtons();
-                            }
-                        })
+                        .setView(listContainer)
                         .setNegativeButton("Cancel", null)
                         .show();
+                ViewGroup.LayoutParams containerParams = listContainer.getLayoutParams();
+                containerParams.height = listHeight;
+                containerParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                listContainer.setLayoutParams(containerParams);
+                listView.setOnItemClickListener(new android.widget.AdapterView.OnItemClickListener() {
+                    @Override
+                    public void onItemClick(android.widget.AdapterView<?> parent, View view, int which, long id) {
+                        int slot = slots.get(which);
+                        if (bound && service != null) {
+                            service.selectTranscription(slot);
+                        } else {
+                            localStore.setActiveSlot(slot);
+                            String chosen = localStore.getTextForSlot(slot);
+                            latestTranscript = chosen == null ? "" : chosen;
+                            transcriptView.setText(latestTranscript);
+                            scrollTranscriptToBottom();
+                        }
+                        updateButtons();
+                        selectDialog.dismiss();
+                    }
+                });
             }
         });
         controls.addView(selectButton, buttonParams());
@@ -272,8 +350,50 @@ public class MainActivity extends Activity {
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 1f);
-        params.setMargins(dp(4), 0, dp(4), 0);
+        params.setMargins(dp(1), 0, dp(1), 0);
         return params;
+    }
+
+    private void setButtonIcon(Button button, int drawableResource) {
+        button.setSingleLine(true);
+        button.setMaxLines(1);
+        button.setEllipsize(TextUtils.TruncateAt.END);
+        button.setHorizontallyScrolling(true);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinEms(0);
+        button.setPadding(dp(9), dp(8), dp(6), dp(8));
+        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setTextColor(new ColorStateList(
+                new int[][]{
+                        new int[]{android.R.attr.state_enabled},
+                        new int[]{-android.R.attr.state_enabled}
+                },
+                new int[]{
+                        Color.rgb(31, 41, 55),
+                        Color.rgb(112, 124, 144)
+                }));
+
+        Drawable icon = getDrawable(drawableResource);
+        if (icon == null) {
+            return;
+        }
+        int iconSize = dp(16);
+        icon.setBounds(0, 0, iconSize, iconSize);
+        icon.setTintList(new ColorStateList(
+                new int[][]{
+                        new int[]{android.R.attr.state_enabled},
+                        new int[]{-android.R.attr.state_enabled}
+                },
+                new int[]{
+                        Color.rgb(55, 65, 81),
+                        Color.rgb(112, 124, 144)
+                }));
+        button.setCompoundDrawablePadding(dp(1));
+        button.setCompoundDrawables(icon, null, null, null);
+        button.setMinHeight(dp(44));
+        button.setMinimumHeight(dp(44));
+        button.setIncludeFontPadding(false);
     }
 
     private void startOrRequestPermission(PendingAction action) {
@@ -282,9 +402,7 @@ public class MainActivity extends Activity {
             return;
         }
         pendingAction = action;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            requestPermissions(requiredPermissions(), PERMISSION_REQUEST_CODE);
-        }
+        requestPermissions(requiredPermissions(), PERMISSION_REQUEST_CODE);
     }
 
     @Override
@@ -299,14 +417,11 @@ public class MainActivity extends Activity {
             runPendingAction(action);
         } else {
             pendingAction = PendingAction.NONE;
-            Toast.makeText(this, "Microphone permission is needed for transcription.", Toast.LENGTH_LONG).show();
+            showToast("Microphone permission is needed for transcription.", Toast.LENGTH_LONG);
         }
     }
 
     private boolean hasAudioPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return true;
-        }
         return checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
     }
 
@@ -343,11 +458,11 @@ public class MainActivity extends Activity {
             return;
         }
         clipboard.setPrimaryClip(ClipData.newPlainText("Transcription", latestTranscript));
-        Toast.makeText(this, "Transcription copied", Toast.LENGTH_SHORT).show();
+        showToast("Transcription copied", Toast.LENGTH_SHORT);
     }
 
     private void updateButtons() {
-        micButton.setText(recording ? "Stop" : "Start");
+        micButton.setText(recording ? R.string.button_stop : R.string.button_start);
         copyButton.setEnabled(!recording && !latestTranscript.trim().isEmpty());
         newButton.setEnabled(!recording);
         if (selectButton != null && localStore != null) {
@@ -358,14 +473,77 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void showToast(String message, int duration) {
+        if (toastOverlay != null && toastOverlay.getParent() instanceof ViewGroup) {
+            ((ViewGroup) toastOverlay.getParent()).removeView(toastOverlay);
+        }
+
+        final TextView toastView = new TextView(this);
+        toastView.setText(message);
+        toastView.setTextColor(Color.WHITE);
+        toastView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        toastView.setGravity(Gravity.CENTER);
+        toastView.setMaxWidth(getResources().getDisplayMetrics().widthPixels - dp(48));
+        toastView.setPadding(dp(16), dp(10), dp(16), dp(10));
+
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Color.rgb(37, 99, 235));
+        background.setCornerRadius(dp(20));
+        toastView.setBackground(background);
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER);
+        params.setMargins(dp(24), 0, dp(24), 0);
+
+        toastOverlay = toastView;
+        addContentView(toastView, params);
+
+        int displayMillis = duration == Toast.LENGTH_LONG ? 3500 : 2000;
+        toastView.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (toastOverlay == toastView && toastView.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) toastView.getParent()).removeView(toastView);
+                    toastOverlay = null;
+                }
+            }
+        }, displayMillis);
+    }
+
     private String previewFor(String text) {
         if (text == null) return "";
         // collapse whitespace and newlines into single spaces
         String oneLine = text.replaceAll("\\s+", " ").trim();
-        // limit to approx 34 characters to fit a single dialog line on most devices
-        int max = 34;
+        // limit characters to keep the dialog tidy
+        int max = 44;
         if (oneLine.length() <= max) return oneLine;
-        return oneLine.substring(0, Math.min(oneLine.length(), max)).trim() + "…";
+        int cut = oneLine.lastIndexOf(' ', max);
+        if (cut < max / 2) {
+            cut = max;
+        }
+        return oneLine.substring(0, cut).trim() + "…";
+    }
+
+    private String selectLabelFor(int slot, String text) {
+        long createdAt = localStore.getCreatedAtForSlot(slot);
+        String timestamp = createdAt > 0L
+                ? new SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.getDefault()).format(new Date(createdAt))
+                : "Saved transcription";
+        return timestamp + "\n" + previewFor(text);
+    }
+
+    private void scrollTranscriptToBottom() {
+        if (transcriptContainer == null) {
+            return;
+        }
+        transcriptContainer.post(new Runnable() {
+            @Override
+            public void run() {
+                transcriptContainer.fullScroll(View.FOCUS_DOWN);
+            }
+        });
     }
 
     private int dp(int value) {
