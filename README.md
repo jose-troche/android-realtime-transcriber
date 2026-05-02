@@ -1,78 +1,48 @@
 # Live Transcriber
 
-A native Android app for offline-preferred live transcription.
+Native Android live transcription with online-first speech recognition, offline fallback, and local transcript history.
 
-The app targets Android API 35 so modern Android devices do not treat the APK as an old-target app.
+The app targets Android API 35.
 
 ## Features
 
-- Start/stop microphone transcription from one screen.
-- Transcript text fills most of the display and persists locally.
-- Stop pauses transcription; Start continues appending to the current transcript.
-- Copy is enabled only while recording is stopped.
-- New is available only while the microphone is stopped. It clears the text area, creates a new saved transcript slot, and leaves the microphone off.
-- Stores up to 10 transcripts in a circular local `SharedPreferences` buffer.
-- Uses a microphone foreground service so active transcription continues while the screen is locked or another app is foregrounded.
-- Stops recording after 1 hour outside the foreground.
+- Start/Stop controls microphone transcription.
+- Stop pauses recording; Start resumes and appends to the current transcript.
+- Copy, New, Delete, and Select are available only while the microphone is stopped.
+- New creates an empty transcript slot and leaves the microphone off.
+- Select loads one of the saved non-empty transcriptions.
+- Delete removes the active transcription and selects the next saved one, or clears the screen if none remain.
+- Up to 10 transcriptions are stored locally in a circular `SharedPreferences` buffer.
+- Active recording runs in a foreground microphone service while the screen is locked or another app is open.
+- Background recording stops after 3 hours outside the foreground.
 
-## Offline Recognition
+## Speech Recognition
 
-The implementation uses Android's on-device `SpeechRecognizer` on Android 12+ when available, and falls back to the platform recognizer with `RecognizerIntent.EXTRA_PREFER_OFFLINE` on older or unsupported devices. For fully offline behavior, the device needs an installed on-device/offline speech recognition engine for the active language.
+Recording starts with Android's regular `SpeechRecognizer`, which may use an online recognition service. If that recognizer reports a network or server failure, the service switches to offline mode and restarts recognition with `RecognizerIntent.EXTRA_PREFER_OFFLINE`.
 
-### Verify Offline Speech Recognition
-
-The most reliable test is to force the device offline:
-
-1. Install and open the app once while online.
-2. Grant microphone permission.
-3. Turn on Airplane mode and turn Wi-Fi off.
-4. Open the app, tap Start, and speak a short sentence.
-5. If text appears, offline speech recognition is available for the active device language.
-6. If no text appears, install or update the offline language pack, then repeat the test.
-
-You can also inspect the configured recognizer with ADB:
-
-```sh
-adb shell settings get secure voice_recognition_service
-```
-
-This should print a recognizer component, commonly from Google or the device manufacturer. A configured recognizer does not guarantee that the needed offline language pack is installed, so still run the Airplane mode test.
-
-### Install Offline Language Packs
-
-Menu names vary by Android version and manufacturer. Try these paths in order:
-
-1. Android Settings:
-   `Settings > System > Languages & input > Speech > Offline speech recognition`
-
-2. Google settings:
-   `Settings > Google > Settings for Google apps > Search, Assistant & Voice > Voice > Offline speech recognition`
-
-3. Google voice typing:
-   `Settings > System > Languages & input > On-screen keyboard > Google voice typing > Offline speech recognition`
-
-4. Live Transcribe, on Pixel and supported Android devices:
-   `Live Transcribe > Settings > More settings > Primary language` or `Secondary language`
-
-In the language list, download the active language used by the phone/app. If there is an Auto-update tab, enable automatic updates for installed languages.
-
-If none of these menus exist, install or update these apps from Google Play, then check again:
-
-- Speech Services by Google
-- Google
-- Live Transcribe & Sound Notifications
-
-Some non-Google Android builds do not expose an offline recognizer for third-party apps. In that case, the app can still request offline recognition, but the final behavior depends on the recognizer installed on the device.
+On Android 12+, offline fallback uses the on-device speech recognizer when available. Fully offline transcription still depends on the device having an offline recognizer and language pack installed for the active language.
 
 ## Build
 
-Install Android Studio or a compatible Android SDK and JDK, then run:
+Requirements:
+
+- Android Studio or Android SDK command-line tools
+- Android SDK platform 35
+- JDK 17
+
+Build the debug APK:
 
 ```sh
 ./gradlew assembleDebug
 ```
 
-If macOS says it cannot locate a Java runtime, install JDK 17 and make it available to the shell. With Homebrew:
+Install on a connected device:
+
+```sh
+./gradlew installDebug
+```
+
+If macOS cannot locate Java, install and expose JDK 17:
 
 ```sh
 brew install openjdk@17
@@ -80,80 +50,70 @@ export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
 export PATH="$JAVA_HOME/bin:$PATH"
 ```
 
-Add those `export` lines to your shell profile if you want them to apply to new terminal sessions.
+## Device Setup
 
-## Test On A Device
-
-1. Enable Developer options on the Android device.
+1. Enable Developer options on the device.
 2. Enable USB debugging.
-3. Connect the device over USB and approve the debugging prompt on the device.
-4. Make sure `adb` is available. If `adb` is already on your `PATH`, this should print its location:
+3. Connect the device over USB and approve the debugging prompt.
+4. Confirm ADB can see the device:
 
 ```sh
-which adb
+adb devices
 ```
 
-If that prints nothing, use the Android SDK copy directly:
-
-```sh
-~/Library/Android/sdk/platform-tools/adb version
-```
-
-To make `adb` available in future terminal sessions, add platform-tools to your shell profile:
+If `adb` is not found, add Android platform-tools to your shell:
 
 ```sh
 echo 'export PATH="$HOME/Library/Android/sdk/platform-tools:$PATH"' >> ~/.bash_profile
 source ~/.bash_profile
 ```
 
-5. Confirm the device is visible:
-
-```sh
-adb devices
-```
-
-If `adb` is still not on your `PATH`, use:
-
-```sh
-~/Library/Android/sdk/platform-tools/adb devices
-```
-
-6. Build and install the debug APK:
-
-```sh
-./gradlew installDebug
-```
-
-If Android previously warned that the app was built for an old or less secure Android version, reinstall the current debug build. This project now targets API 35:
-
-```sh
-./gradlew installDebug
-```
-
-7. Launch the app from the device launcher, or run:
+Launch the installed app:
 
 ```sh
 adb shell am start -n com.example.realtimetranscriber/.MainActivity
 ```
 
-8. Grant microphone permission when prompted. On Android 13+, also allow notifications so the foreground microphone service can show its required notification.
+Grant microphone permission. On Android 13+, also allow notifications so the foreground microphone service can show its required notification.
+
+## Offline Setup
+
+To verify offline recognition:
+
+1. Open the app once while online and grant permissions.
+2. Turn on Airplane mode and turn Wi-Fi off.
+3. Tap Start and speak a short sentence.
+4. If text appears, offline recognition works for the active language.
+
+If it does not work, install or update the offline language pack. Menu names vary, but common paths are:
+
+- `Settings > System > Languages & input > Speech > Offline speech recognition`
+- `Settings > Google > Settings for Google apps > Search, Assistant & Voice > Voice > Offline speech recognition`
+- `Settings > System > Languages & input > On-screen keyboard > Google voice typing > Offline speech recognition`
+- `Live Transcribe > Settings > More settings > Primary language`
+
+If those menus are missing, update these apps from Google Play:
+
+- Speech Services by Google
+- Google
+- Live Transcribe & Sound Notifications
+
+Some Android builds do not expose offline recognition to third-party apps, even when the app requests it.
 
 ## Manual Test Checklist
 
-- Tap Start and speak. Text should appear in the transcript area.
-- Tap Stop. Transcription should pause, Copy should become enabled, and New should become enabled.
-- Tap Start again. New speech should append to the existing transcript.
-- Tap Copy while stopped, then paste into another app to confirm clipboard contents.
-- Tap New while stopped. The transcript area should clear and the mic should remain off.
-- Start recording, lock the phone or switch to another app, then return. Transcription should continue while the foreground service notification is active.
-- Leave recording in the background. It should stop automatically after 1 hour outside the foreground.
+- Start recording and speak; text appears in the transcript area.
+- Stop recording; Copy, New, Delete, and Select become available as appropriate.
+- Start again; new speech appends to the selected transcript.
+- Copy while stopped, then paste into another app.
+- New while stopped clears the text and keeps the mic off.
+- Select while stopped loads a saved transcript and keeps the mic off.
+- Delete while stopped removes the active transcript.
+- Lock the phone or switch apps while recording; transcription continues with the foreground service notification active.
+- Leave recording in the background for 3 hours; it stops automatically.
 
 ## Logs
-
-Use `adb logcat` while testing on a device:
 
 ```sh
 adb logcat | grep realtimetranscriber
 ```
-
-If the app does not transcribe offline, follow the verification and language-pack steps in the Offline Recognition section above.
