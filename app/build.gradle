@@ -14,3 +14,7 @@ android {
         versionName "1.0"
     }
 }
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += "-Xlint:deprecation"
+}
