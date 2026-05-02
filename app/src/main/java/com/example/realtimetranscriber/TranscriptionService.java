@@ -30,7 +30,8 @@ public class TranscriptionService extends Service {
     private static final int NOTIFICATION_ID = 1001;
     private static final String CHANNEL_ID = "live_transcription";
     private static final long RESTART_DELAY_MS = 350L;
-    private static final long MAX_BACKGROUND_RECORDING_MS = 60L * 60L * 1000L;
+    private static final long STOP_FLUSH_TIMEOUT_MS = 1500L;
+    private static final long MAX_BACKGROUND_RECORDING_MS = 3L * 60L * 60L * 1000L;
 
     private final IBinder binder = new LocalBinder();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -42,6 +43,9 @@ public class TranscriptionService extends Service {
     private boolean recording;
     private boolean appInForeground;
     private boolean manuallyStopping;
+    private boolean finalizingStop;
+    private boolean finalizingStopTimedOut;
+    private boolean offlineMode;
     private String partialText = "";
     private String status = "Ready";
     private long backgroundStartedAt = 0L;
@@ -107,11 +111,11 @@ public class TranscriptionService extends Service {
     }
 
     String getTranscript() {
-        return getVisibleTranscript();
+        return getDisplayedTranscript();
     }
 
     boolean isRecording() {
-        return recording;
+        return recording || finalizingStop;
     }
 
     void startNewTranscription() {
@@ -119,11 +123,7 @@ public class TranscriptionService extends Service {
             recording = false;
             manuallyStopping = true;
             stopRecognizer();
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE);
-            } else {
-                stopForeground(true);
-            }
+            stopForegroundCompat();
             mainHandler.removeCallbacks(backgroundStopRunnable);
         }
         store.startNewTranscription();
@@ -135,11 +135,10 @@ public class TranscriptionService extends Service {
     }
 
     void startRecording() {
-        if (recording) {
+        if (recording || finalizingStop) {
             return;
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             status = "Microphone permission is required";
             notifyStateChanged();
             stopSelfIfIdle();
@@ -148,8 +147,10 @@ public class TranscriptionService extends Service {
 
         recording = true;
         manuallyStopping = false;
-        status = "Listening offline";
-        startForeground(NOTIFICATION_ID, buildNotification("Listening"));
+        finalizingStop = false;
+        offlineMode = false;
+        status = "Listening online";
+        startForeground(NOTIFICATION_ID, buildNotification("Listening online"));
         startRecognizer();
         if (!appInForeground) {
             if (backgroundStartedAt == 0L) {
@@ -166,17 +167,36 @@ public class TranscriptionService extends Service {
         }
         recording = false;
         manuallyStopping = true;
-        stopRecognizer();
-        status = timedOut ? "Stopped after 1 hour in background" : "Paused";
-        persistVisibleTranscript();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } else {
-            stopForeground(true);
-        }
+        finalizingStop = true;
+        finalizingStopTimedOut = timedOut;
+        status = timedOut ? "Finishing background transcription" : "Finishing transcription";
         mainHandler.removeCallbacks(backgroundStopRunnable);
         notifyStateChanged();
-        stopSelfIfIdle();
+        flushRecognizerBeforeStop();
+    }
+
+    void selectTranscription(int slot) {
+        if (recording) {
+            return;
+        }
+        store.setActiveSlot(slot);
+        committedText.setLength(0);
+        committedText.append(store.getActiveText());
+        partialText = "";
+        status = "Selected transcription";
+        notifyStateChanged();
+    }
+
+    void deleteActiveTranscription() {
+        if (recording) {
+            return;
+        }
+        store.deleteActiveSlot();
+        committedText.setLength(0);
+        committedText.append(store.getActiveText());
+        partialText = "";
+        status = committedText.length() == 0 ? "No saved transcription selected" : "Selected next transcription";
+        notifyStateChanged();
     }
 
     private void startRecognizer() {
@@ -186,14 +206,20 @@ public class TranscriptionService extends Service {
                 if (!recording) {
                     return;
                 }
-                if (recognizer == null) {
-                    recognizer = createSpeechRecognizer();
-                    recognizer.setRecognitionListener(recognitionListener);
-                }
                 try {
+                    if (recognizer == null) {
+                        recognizer = createSpeechRecognizer();
+                        recognizer.setRecognitionListener(recognitionListener);
+                    }
                     recognizer.startListening(buildRecognizerIntent());
                 } catch (RuntimeException exception) {
-                    status = "Speech recognizer could not start";
+                    if (!offlineMode) {
+                        offlineMode = true;
+                        destroyRecognizerNow();
+                        status = "Online unavailable; switching offline";
+                    } else {
+                        status = "Speech recognizer could not start";
+                    }
                     notifyStateChanged();
                     scheduleRecognizerRestart();
                 }
@@ -202,11 +228,16 @@ public class TranscriptionService extends Service {
     }
 
     private SpeechRecognizer createSpeechRecognizer() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        if (offlineMode
+                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
             return SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
         }
-        status = "Using offline-preferred recognizer";
+        if (!offlineMode && SpeechRecognizer.isRecognitionAvailable(this)) {
+            status = "Using online recognizer";
+            return SpeechRecognizer.createSpeechRecognizer(this);
+        }
+        status = offlineMode ? "Using offline recognizer" : "Using available recognizer";
         return SpeechRecognizer.createSpeechRecognizer(this);
     }
 
@@ -216,7 +247,7 @@ public class TranscriptionService extends Service {
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag());
         intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
         intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-        intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+        intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, offlineMode);
         return intent;
     }
 
@@ -225,6 +256,25 @@ public class TranscriptionService extends Service {
             @Override
             public void run() {
                 destroyRecognizerNow();
+            }
+        });
+    }
+
+    private void flushRecognizerBeforeStop() {
+        mainHandler.removeCallbacks(finalizeStopRunnable);
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (recognizer == null) {
+                    finishStoppedRecording();
+                    return;
+                }
+                try {
+                    recognizer.stopListening();
+                    mainHandler.postDelayed(finalizeStopRunnable, STOP_FLUSH_TIMEOUT_MS);
+                } catch (RuntimeException ignored) {
+                    finishStoppedRecording();
+                }
             }
         });
     }
@@ -256,7 +306,7 @@ public class TranscriptionService extends Service {
     private final RecognitionListener recognitionListener = new RecognitionListener() {
         @Override
         public void onReadyForSpeech(Bundle params) {
-            status = "Listening offline";
+            status = offlineMode ? "Listening offline" : "Listening online";
             notifyStateChanged();
         }
 
@@ -282,6 +332,10 @@ public class TranscriptionService extends Service {
 
         @Override
         public void onError(int error) {
+            if (finalizingStop) {
+                finishStoppedRecording();
+                return;
+            }
             partialText = "";
             if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                 stopRecording(false);
@@ -290,9 +344,15 @@ public class TranscriptionService extends Service {
                 return;
             }
             if (recording && !manuallyStopping) {
-                status = error == SpeechRecognizer.ERROR_NO_MATCH
-                        ? "Listening offline"
-                        : "Restarting recognizer";
+                if (!offlineMode && shouldFallbackOffline(error)) {
+                    offlineMode = true;
+                    destroyRecognizerNow();
+                    status = "Online unavailable; switching offline";
+                } else {
+                    status = error == SpeechRecognizer.ERROR_NO_MATCH
+                            ? (offlineMode ? "Listening offline" : "Listening online")
+                            : "Restarting recognizer";
+                }
                 notifyStateChanged();
                 scheduleRecognizerRestart();
             }
@@ -302,7 +362,11 @@ public class TranscriptionService extends Service {
         public void onResults(Bundle results) {
             appendBestResult(results);
             partialText = "";
-            persistVisibleTranscript();
+            persistCommittedTranscript();
+            if (finalizingStop) {
+                finishStoppedRecording();
+                return;
+            }
             notifyStateChanged();
             if (recording && !manuallyStopping) {
                 scheduleRecognizerRestart();
@@ -314,7 +378,6 @@ public class TranscriptionService extends Service {
             ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
             if (matches != null && !matches.isEmpty()) {
                 partialText = matches.get(0);
-                persistVisibleTranscript();
                 notifyStateChanged();
             }
         }
@@ -346,25 +409,61 @@ public class TranscriptionService extends Service {
         committedText.append(cleanPhrase);
     }
 
-    private String getVisibleTranscript() {
-        if (partialText == null || partialText.trim().isEmpty()) {
+    private String getDisplayedTranscript() {
+        String partial = partialText == null ? "" : partialText.trim();
+        if (partial.isEmpty()) {
             return committedText.toString();
         }
         String committed = committedText.toString();
         if (committed.trim().isEmpty()) {
-            return partialText.trim();
+            return partial;
         }
-        return committed + " " + partialText.trim();
+        return committed + " " + partial;
     }
 
-    private void persistVisibleTranscript() {
-        store.updateActiveText(getVisibleTranscript());
+    private void commitPartialText() {
+        appendPhrase(partialText);
+        partialText = "";
     }
+
+    private void persistCommittedTranscript() {
+        store.updateActiveText(committedText.toString());
+    }
+
+    private void finishStoppedRecording() {
+        mainHandler.removeCallbacks(finalizeStopRunnable);
+        commitPartialText();
+        persistCommittedTranscript();
+        destroyRecognizerNow();
+        status = finalizingStopTimedOut ? "Stopped after 3 hours in background" : "Paused";
+        finalizingStop = false;
+        finalizingStopTimedOut = false;
+        stopForegroundCompat();
+        notifyStateChanged();
+        stopSelfIfIdle();
+    }
+
+    private final Runnable finalizeStopRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (finalizingStop) {
+                finishStoppedRecording();
+            }
+        }
+    };
 
     private void notifyStateChanged() {
         if (listener != null) {
-            listener.onStateChanged(getVisibleTranscript(), recording, status);
+            listener.onStateChanged(getDisplayedTranscript(), recording || finalizingStop, status);
         }
+    }
+
+    private boolean shouldFallbackOffline(int error) {
+        return error == SpeechRecognizer.ERROR_NETWORK
+                || error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT
+                || error == SpeechRecognizer.ERROR_SERVER
+                || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED);
     }
 
     private void scheduleBackgroundStop() {
@@ -390,20 +489,23 @@ public class TranscriptionService extends Service {
                 this,
                 0,
                 activityIntent,
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                        ? PendingIntent.FLAG_IMMUTABLE
-                        : 0);
+                PendingIntent.FLAG_IMMUTABLE);
 
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
-        return builder
+        return newNotificationBuilder()
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setContentTitle("Live transcription active")
                 .setContentText(text)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .build();
+    }
+
+    @SuppressWarnings("deprecation")
+    private Notification.Builder newNotificationBuilder() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return new Notification.Builder(this, CHANNEL_ID);
+        }
+        return new Notification.Builder(this);
     }
 
     private void createNotificationChannel() {
@@ -424,6 +526,15 @@ public class TranscriptionService extends Service {
     private void stopSelfIfIdle() {
         if (!recording && listener == null) {
             stopSelf();
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void stopForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } else {
+            stopForeground(true);
         }
     }
 }

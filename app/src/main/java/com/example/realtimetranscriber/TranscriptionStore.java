@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 final class TranscriptionStore {
@@ -11,6 +13,7 @@ final class TranscriptionStore {
     private static final String KEY_ACTIVE_SLOT = "active_slot";
     private static final String KEY_NEXT_SLOT = "next_slot";
     private static final String KEY_SLOT_PREFIX = "slot_";
+    private static final String KEY_SLOT_CREATED_AT_PREFIX = "slot_created_at_";
     private static final int MAX_TRANSCRIPTIONS = 10;
 
     private final SharedPreferences preferences;
@@ -30,12 +33,13 @@ final class TranscriptionStore {
     }
 
     synchronized void startNewTranscription() {
-        int slot = preferences.getInt(KEY_NEXT_SLOT, 0);
+        int slot = findSlotForNewTranscription();
         int nextSlot = (slot + 1) % MAX_TRANSCRIPTIONS;
         preferences.edit()
                 .putInt(KEY_ACTIVE_SLOT, slot)
                 .putInt(KEY_NEXT_SLOT, nextSlot)
                 .putString(slotKey(slot), "")
+                .putLong(slotCreatedAtKey(slot), System.currentTimeMillis())
                 .apply();
     }
 
@@ -64,8 +68,33 @@ final class TranscriptionStore {
         return slots;
     }
 
+    synchronized List<Integer> getNonEmptySlotsChronological() {
+        ArrayList<Integer> slots = new ArrayList<>();
+        for (int slot = 0; slot < MAX_TRANSCRIPTIONS; slot++) {
+            String text = preferences.getString(slotKey(slot), "");
+            if (text != null && !text.trim().isEmpty()) {
+                slots.add(slot);
+            }
+        }
+        Collections.sort(slots, new Comparator<Integer>() {
+            @Override
+            public int compare(Integer left, Integer right) {
+                long leftCreatedAt = getCreatedAtForSlot(left);
+                long rightCreatedAt = getCreatedAtForSlot(right);
+                if (leftCreatedAt < rightCreatedAt) return -1;
+                if (leftCreatedAt > rightCreatedAt) return 1;
+                return left - right;
+            }
+        });
+        return slots;
+    }
+
     synchronized String getTextForSlot(int slot) {
         return preferences.getString(slotKey(slot), "");
+    }
+
+    synchronized long getCreatedAtForSlot(int slot) {
+        return preferences.getLong(slotCreatedAtKey(slot), 0L);
     }
 
     synchronized void setActiveSlot(int slot) {
@@ -82,6 +111,7 @@ final class TranscriptionStore {
                 .putInt(KEY_ACTIVE_SLOT, 0)
                 .putInt(KEY_NEXT_SLOT, 1)
                 .putString(slotKey(0), "")
+                .putLong(slotCreatedAtKey(0), System.currentTimeMillis())
                 .apply();
         return 0;
     }
@@ -90,10 +120,62 @@ final class TranscriptionStore {
         return preferences.getInt(KEY_ACTIVE_SLOT, 0);
     }
 
+    private int findSlotForNewTranscription() {
+        int activeSlot = preferences.getInt(KEY_ACTIVE_SLOT, -1);
+        if (isValidSlot(activeSlot) && isSlotEmpty(activeSlot)) {
+            return activeSlot;
+        }
+
+        int nextSlot = preferences.getInt(KEY_NEXT_SLOT, 0);
+        for (int offset = 0; offset < MAX_TRANSCRIPTIONS; offset++) {
+            int slot = (nextSlot + offset) % MAX_TRANSCRIPTIONS;
+            if (isSlotEmpty(slot)) {
+                return slot;
+            }
+        }
+
+        return findOldestSlotExcept(activeSlot);
+    }
+
+    private int findOldestSlotExcept(int excludedSlot) {
+        int fallbackSlot = isValidSlot(excludedSlot) ? (excludedSlot + 1) % MAX_TRANSCRIPTIONS : 0;
+        int oldestSlot = fallbackSlot;
+        long oldestCreatedAt = Long.MAX_VALUE;
+        for (int slot = 0; slot < MAX_TRANSCRIPTIONS; slot++) {
+            if (slot == excludedSlot) {
+                continue;
+            }
+            long createdAt = getCreatedAtForSlot(slot);
+            if (createdAt <= 0L) {
+                return slot;
+            }
+            if (createdAt < oldestCreatedAt) {
+                oldestCreatedAt = createdAt;
+                oldestSlot = slot;
+            }
+        }
+        return oldestSlot;
+    }
+
+    private boolean isSlotEmpty(int slot) {
+        if (!isValidSlot(slot)) {
+            return false;
+        }
+        String text = preferences.getString(slotKey(slot), "");
+        return text == null || text.trim().isEmpty();
+    }
+
+    private static boolean isValidSlot(int slot) {
+        return slot >= 0 && slot < MAX_TRANSCRIPTIONS;
+    }
+
     synchronized void deleteActiveSlot() {
         int active = getOrCreateActiveSlot();
         // Clear the active slot
-        preferences.edit().putString(slotKey(active), "").apply();
+        preferences.edit()
+                .putString(slotKey(active), "")
+                .remove(slotCreatedAtKey(active))
+                .apply();
         // Find next non-empty slot (forward wrap). If found, make it active.
         for (int i = 1; i < MAX_TRANSCRIPTIONS; i++) {
             int idx = (active + i) % MAX_TRANSCRIPTIONS;
@@ -104,10 +186,18 @@ final class TranscriptionStore {
             }
         }
         // No non-empty slot found — reset active slot to 0 and ensure it's empty
-        preferences.edit().putInt(KEY_ACTIVE_SLOT, 0).putString(slotKey(0), "").apply();
+        preferences.edit()
+                .putInt(KEY_ACTIVE_SLOT, 0)
+                .putString(slotKey(0), "")
+                .putLong(slotCreatedAtKey(0), System.currentTimeMillis())
+                .apply();
     }
 
     private static String slotKey(int slot) {
         return KEY_SLOT_PREFIX + slot;
+    }
+
+    private static String slotCreatedAtKey(int slot) {
+        return KEY_SLOT_CREATED_AT_PREFIX + slot;
     }
 }
