@@ -8,12 +8,15 @@ The app targets Android API 35.
 
 - Start/Stop controls microphone transcription.
 - Stop pauses recording; Start resumes and appends to the current transcript.
-- Copy, New, Delete, and Select are available only while the microphone is stopped.
+- Copy, Share, Export, New, Delete, and Select are available only while the microphone is stopped.
+- Share sends the current transcript as a `.txt` attachment to another app through Android's share sheet.
+- Export saves the current transcript as a local `.txt` file.
 - New creates an empty transcript slot and leaves the microphone off.
 - Select loads one of the saved non-empty transcriptions.
 - Delete removes the active transcription and selects the next saved one, or clears the screen if none remain.
 - Up to 10 transcriptions are stored locally in a circular `SharedPreferences` buffer.
 - Active recording runs in a foreground microphone service while the screen is locked or another app is open.
+- In-progress words are preserved more reliably when Android interrupts and restarts recognition during app switches or lock/screen-saver transitions.
 - Background recording stops after 3 hours outside the foreground.
 
 ## Speech Recognition
@@ -76,6 +79,11 @@ adb shell am start -n com.example.realtimetranscriber/.MainActivity
 
 Grant microphone permission. On Android 13+, also allow notifications so the foreground microphone service can show its required notification.
 
+When you use Export:
+
+- On Android 10 and newer, files are saved to `Downloads/Transcriber`.
+- On older Android versions, files are saved to the app-specific downloads directory under `Transcriber`.
+
 ## Offline Setup
 
 To verify offline recognition:
@@ -103,13 +111,16 @@ Some Android builds do not expose offline recognition to third-party apps, even 
 ## Manual Test Checklist
 
 - Start recording and speak; text appears in the transcript area.
-- Stop recording; Copy, New, Delete, and Select become available as appropriate.
+- Stop recording; Copy, Share, Export, New, Delete, and Select become available as appropriate.
 - Start again; new speech appends to the selected transcript.
 - Copy while stopped, then paste into another app.
+- Share while stopped, then confirm another app receives a `.txt` attachment.
+- Export while stopped, then confirm a `.txt` file is saved locally.
 - New while stopped clears the text and keeps the mic off.
 - Select while stopped loads a saved transcript and keeps the mic off.
 - Delete while stopped removes the active transcript.
 - Lock the phone or switch apps while recording; transcription continues with the foreground service notification active.
+- Speak during an app switch or lock/unlock transition and confirm words are not dropped when recognition restarts.
 - Leave recording in the background for 3 hours; it stops automatically.
 
 ## Logs
