@@ -30,6 +30,7 @@ public class TranscriptionService extends Service {
     private static final int NOTIFICATION_ID = 1001;
     private static final String CHANNEL_ID = "live_transcription";
     private static final long RESTART_DELAY_MS = 350L;
+    private static final long MAX_RESTART_DELAY_MS = 5000L;
     private static final long STOP_FLUSH_TIMEOUT_MS = 1500L;
     private static final long MAX_BACKGROUND_RECORDING_MS = 3L * 60L * 60L * 1000L;
 
@@ -49,6 +50,7 @@ public class TranscriptionService extends Service {
     private String partialText = "";
     private String status = "Ready";
     private long backgroundStartedAt = 0L;
+    private long recognizerRestartDelayMs = RESTART_DELAY_MS;
 
     public final class LocalBinder extends Binder {
         TranscriptionService getService() {
@@ -149,6 +151,7 @@ public class TranscriptionService extends Service {
         manuallyStopping = false;
         finalizingStop = false;
         offlineMode = false;
+        recognizerRestartDelayMs = RESTART_DELAY_MS;
         status = "Listening online";
         startForeground(NOTIFICATION_ID, buildNotification("Listening online"));
         startRecognizer();
@@ -213,9 +216,9 @@ public class TranscriptionService extends Service {
                     }
                     recognizer.startListening(buildRecognizerIntent());
                 } catch (RuntimeException exception) {
+                    destroyRecognizerNow();
                     if (!offlineMode) {
                         offlineMode = true;
-                        destroyRecognizerNow();
                         status = "Online unavailable; switching offline";
                     } else {
                         status = "Speech recognizer could not start";
@@ -255,6 +258,7 @@ public class TranscriptionService extends Service {
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
+                mainHandler.removeCallbacks(recognizerRestartRunnable);
                 destroyRecognizerNow();
             }
         });
@@ -293,19 +297,25 @@ public class TranscriptionService extends Service {
     }
 
     private void scheduleRecognizerRestart() {
-        mainHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (recording && !manuallyStopping) {
-                    startRecognizer();
-                }
-            }
-        }, RESTART_DELAY_MS);
+        mainHandler.removeCallbacks(recognizerRestartRunnable);
+        long delayMs = recognizerRestartDelayMs;
+        recognizerRestartDelayMs = Math.min(recognizerRestartDelayMs * 2, MAX_RESTART_DELAY_MS);
+        mainHandler.postDelayed(recognizerRestartRunnable, delayMs);
     }
+
+    private final Runnable recognizerRestartRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (recording && !manuallyStopping) {
+                startRecognizer();
+            }
+        }
+    };
 
     private final RecognitionListener recognitionListener = new RecognitionListener() {
         @Override
         public void onReadyForSpeech(Bundle params) {
+            recognizerRestartDelayMs = RESTART_DELAY_MS;
             status = offlineMode ? "Listening offline" : "Listening online";
             notifyStateChanged();
         }
@@ -336,19 +346,24 @@ public class TranscriptionService extends Service {
                 finishStoppedRecording();
                 return;
             }
-            partialText = "";
             if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                partialText = "";
                 stopRecording(false);
                 status = "Microphone permission is required";
                 notifyStateChanged();
                 return;
             }
             if (recording && !manuallyStopping) {
+                boolean shouldCommitPartial = error != SpeechRecognizer.ERROR_NO_MATCH;
+                if (shouldCommitPartial) {
+                    commitPartialTextForRestart();
+                }
                 if (!offlineMode && shouldFallbackOffline(error)) {
                     offlineMode = true;
                     destroyRecognizerNow();
                     status = "Online unavailable; switching offline";
                 } else {
+                    destroyRecognizerNow();
                     status = error == SpeechRecognizer.ERROR_NO_MATCH
                             ? (offlineMode ? "Listening offline" : "Listening online")
                             : "Restarting recognizer";
@@ -403,10 +418,14 @@ public class TranscriptionService extends Service {
         if (cleanPhrase.isEmpty()) {
             return;
         }
+        String textToAppend = trimRepeatedPrefix(cleanPhrase);
+        if (textToAppend.isEmpty()) {
+            return;
+        }
         if (committedText.length() > 0 && !Character.isWhitespace(committedText.charAt(committedText.length() - 1))) {
             committedText.append(' ');
         }
-        committedText.append(cleanPhrase);
+        committedText.append(textToAppend);
     }
 
     private String getDisplayedTranscript() {
@@ -426,12 +445,69 @@ public class TranscriptionService extends Service {
         partialText = "";
     }
 
+    private void commitPartialTextForRestart() {
+        String partial = partialText == null ? "" : partialText.trim();
+        if (partial.isEmpty()) {
+            return;
+        }
+        appendPhrase(partial);
+        partialText = "";
+        persistCommittedTranscript();
+    }
+
+    private String trimRepeatedPrefix(String phrase) {
+        if (committedText.length() == 0) {
+            return phrase;
+        }
+        String committed = committedText.toString().trim();
+        if (committed.isEmpty()) {
+            return phrase;
+        }
+
+        String[] committedWords = committed.split("\\s+");
+        String[] phraseWords = phrase.split("\\s+");
+        int maxOverlap = Math.min(committedWords.length, phraseWords.length);
+        int overlapWords = 0;
+        for (int candidate = maxOverlap; candidate > 0; candidate--) {
+            if (matchesWordOverlap(committedWords, phraseWords, candidate)) {
+                overlapWords = candidate;
+                break;
+            }
+        }
+        if (overlapWords == 0) {
+            return phrase;
+        }
+        if (overlapWords == phraseWords.length) {
+            return "";
+        }
+
+        StringBuilder builder = new StringBuilder();
+        for (int index = overlapWords; index < phraseWords.length; index++) {
+            if (builder.length() > 0) {
+                builder.append(' ');
+            }
+            builder.append(phraseWords[index]);
+        }
+        return builder.toString();
+    }
+
+    private boolean matchesWordOverlap(String[] committedWords, String[] phraseWords, int overlapWords) {
+        int committedStart = committedWords.length - overlapWords;
+        for (int index = 0; index < overlapWords; index++) {
+            if (!committedWords[committedStart + index].equalsIgnoreCase(phraseWords[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private void persistCommittedTranscript() {
         store.updateActiveText(committedText.toString());
     }
 
     private void finishStoppedRecording() {
         mainHandler.removeCallbacks(finalizeStopRunnable);
+        mainHandler.removeCallbacks(recognizerRestartRunnable);
         commitPartialText();
         persistCommittedTranscript();
         destroyRecognizerNow();
