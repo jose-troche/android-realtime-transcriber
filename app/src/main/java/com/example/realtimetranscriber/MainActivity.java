@@ -1,23 +1,29 @@
 package com.example.realtimetranscriber;
 
 import android.Manifest;
+import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.ActivityNotFoundException;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.IBinder;
+import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.text.method.ScrollingMovementMethod;
 import android.util.TypedValue;
@@ -33,20 +39,28 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
+import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST_CODE = 42;
     private static final int CONTROL_BUTTON_TEXT_SP = 13;
+    private static final String EXPORT_DIRECTORY_NAME = "Transcriber";
 
     private TextView transcriptView;
     private ScrollView transcriptContainer;
     private TextView statusView;
     private Button micButton;
     private Button copyButton;
+    private Button shareButton;
+    private Button exportButton;
     private Button newButton;
     private Button deleteButton;
     private Button selectButton;
@@ -162,12 +176,14 @@ public class MainActivity extends Activity {
         transcriptParams.setMargins(0, 0, 0, 0);
         root.addView(transcriptContainer, transcriptParams);
 
-        // Controls: single row, with extra bottom padding so buttons aren't flush to edge
+        // Controls: exactly two rows, with sharing/export grouped on the bottom row.
         LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-        controls.setGravity(Gravity.CENTER);
-        // keep small inner padding, but add larger bottom padding so buttons are comfortably above system bars
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controls.setGravity(Gravity.CENTER_HORIZONTAL);
         controls.setPadding(dp(2), dp(2), dp(2), dp(2));
+
+        LinearLayout primaryControls = createControlsRow();
+        LinearLayout secondaryControls = createControlsRow();
 
         micButton = new Button(this);
         micButton.setText(R.string.button_start);
@@ -184,20 +200,7 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        controls.addView(micButton, buttonParams());
-
-        copyButton = new Button(this);
-        copyButton.setText(R.string.button_copy);
-        copyButton.setAllCaps(false);
-        copyButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
-        setButtonIcon(copyButton, android.R.drawable.ic_menu_upload);
-        copyButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                copyTranscript();
-            }
-        });
-        controls.addView(copyButton, buttonParams());
+        primaryControls.addView(micButton, buttonParams());
 
         newButton = new Button(this);
         newButton.setText(R.string.button_new);
@@ -210,7 +213,7 @@ public class MainActivity extends Activity {
                 sendServiceAction(TranscriptionService.ACTION_START_NEW);
             }
         });
-        controls.addView(newButton, buttonParams());
+        primaryControls.addView(newButton, buttonParams());
 
         // Delete button: removes the current active slot and advances to the next saved slot (or clears)
         deleteButton = new Button(this);
@@ -243,7 +246,7 @@ public class MainActivity extends Activity {
                         .show();
             }
         });
-        controls.addView(deleteButton, buttonParams());
+        primaryControls.addView(deleteButton, buttonParams());
 
         // Select button: when not recording, allows picking any saved transcription
         selectButton = new Button(this);
@@ -336,7 +339,55 @@ public class MainActivity extends Activity {
                 });
             }
         });
-        controls.addView(selectButton, buttonParams());
+        primaryControls.addView(selectButton, buttonParams());
+
+        copyButton = new Button(this);
+        copyButton.setText(R.string.button_copy);
+        copyButton.setAllCaps(false);
+        copyButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(copyButton, android.R.drawable.ic_menu_upload);
+        copyButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                copyTranscript();
+            }
+        });
+        secondaryControls.addView(copyButton, buttonParams());
+
+        shareButton = new Button(this);
+        shareButton.setText(R.string.button_share);
+        shareButton.setAllCaps(false);
+        shareButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(shareButton, android.R.drawable.ic_menu_share);
+        shareButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                shareTranscriptAttachment();
+            }
+        });
+        secondaryControls.addView(shareButton, buttonParams());
+
+        exportButton = new Button(this);
+        exportButton.setText(R.string.button_export);
+        exportButton.setAllCaps(false);
+        exportButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, CONTROL_BUTTON_TEXT_SP);
+        setButtonIcon(exportButton, android.R.drawable.ic_menu_save);
+        exportButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                exportTranscript();
+            }
+        });
+        secondaryControls.addView(exportButton, buttonParams());
+
+        controls.addView(primaryControls, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams secondaryRowParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        secondaryRowParams.topMargin = dp(4);
+        controls.addView(secondaryControls, secondaryRowParams);
 
         root.addView(controls, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -352,6 +403,13 @@ public class MainActivity extends Activity {
                 1f);
         params.setMargins(dp(1), 0, dp(1), 0);
         return params;
+    }
+
+    private LinearLayout createControlsRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        return row;
     }
 
     private void setButtonIcon(Button button, int drawableResource) {
@@ -461,9 +519,137 @@ public class MainActivity extends Activity {
         showToast("Transcription copied", Toast.LENGTH_SHORT);
     }
 
+    private void shareTranscriptAttachment() {
+        String transcript = latestTranscript == null ? "" : latestTranscript.trim();
+        if (transcript.isEmpty()) {
+            return;
+        }
+
+        File shareDirectory = ShareAttachmentProvider.getShareDirectory(this);
+        if (!shareDirectory.exists() && !shareDirectory.mkdirs()) {
+            showToast("Could not prepare the share attachment", Toast.LENGTH_LONG);
+            return;
+        }
+        deleteStaleSharedFiles(shareDirectory);
+
+        String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(new Date());
+        File shareFile = new File(shareDirectory, "transcription-" + timestamp + ".txt");
+        try (FileOutputStream outputStream = new FileOutputStream(shareFile)) {
+            outputStream.write(latestTranscript.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException exception) {
+            showToast("Could not prepare the share attachment", Toast.LENGTH_LONG);
+            return;
+        }
+
+        Uri shareUri = ShareAttachmentProvider.buildUri(this, shareFile.getName());
+        Intent shareIntent = new Intent(Intent.ACTION_SEND);
+        shareIntent.setType("text/plain");
+        shareIntent.putExtra(Intent.EXTRA_STREAM, shareUri);
+        shareIntent.putExtra(Intent.EXTRA_SUBJECT, getString(R.string.app_name) + " transcription");
+        shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        shareIntent.setClipData(ClipData.newUri(getContentResolver(), "Transcription", shareUri));
+
+        try {
+            startActivity(Intent.createChooser(shareIntent, "Share transcription"));
+        } catch (ActivityNotFoundException exception) {
+            showToast("No app can receive the attachment", Toast.LENGTH_LONG);
+        }
+    }
+
+    private void exportTranscript() {
+        String transcript = latestTranscript == null ? "" : latestTranscript.trim();
+        if (transcript.isEmpty()) {
+            return;
+        }
+
+        String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(new Date());
+        String fileName = "transcription-" + timestamp + ".txt";
+
+        try {
+            String location = saveTranscriptLocally(fileName, latestTranscript);
+            showToast("Saved to " + location, Toast.LENGTH_LONG);
+        } catch (IOException exception) {
+            showToast("Could not export the transcript", Toast.LENGTH_LONG);
+        }
+    }
+
+    private String saveTranscriptLocally(String fileName, String transcript) throws IOException {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveTranscriptToDownloads(fileName, transcript);
+            return "Downloads/" + EXPORT_DIRECTORY_NAME;
+        }
+        saveTranscriptToAppDownloads(fileName, transcript);
+        return "app Download/" + EXPORT_DIRECTORY_NAME;
+    }
+
+    @TargetApi(Build.VERSION_CODES.Q)
+    private void saveTranscriptToDownloads(String fileName, String transcript) throws IOException {
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+        values.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
+        values.put(MediaStore.Downloads.RELATIVE_PATH,
+                Environment.DIRECTORY_DOWNLOADS + File.separator + EXPORT_DIRECTORY_NAME);
+        values.put(MediaStore.Downloads.IS_PENDING, 1);
+
+        Uri itemUri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (itemUri == null) {
+            throw new IOException("Could not create download entry");
+        }
+
+        boolean success = false;
+        try (OutputStream outputStream = getContentResolver().openOutputStream(itemUri)) {
+            if (outputStream == null) {
+                throw new IOException("Could not open download output stream");
+            }
+            outputStream.write(transcript.getBytes(StandardCharsets.UTF_8));
+            success = true;
+        } finally {
+            if (success) {
+                ContentValues completedValues = new ContentValues();
+                completedValues.put(MediaStore.Downloads.IS_PENDING, 0);
+                getContentResolver().update(itemUri, completedValues, null, null);
+            } else {
+                getContentResolver().delete(itemUri, null, null);
+            }
+        }
+    }
+
+    private void saveTranscriptToAppDownloads(String fileName, String transcript) throws IOException {
+        File downloadDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (downloadDirectory == null) {
+            throw new IOException("Download directory unavailable");
+        }
+        File exportDirectory = new File(downloadDirectory, EXPORT_DIRECTORY_NAME);
+        if (!exportDirectory.exists() && !exportDirectory.mkdirs()) {
+            throw new IOException("Could not create export directory");
+        }
+        File exportFile = new File(exportDirectory, fileName);
+        try (FileOutputStream outputStream = new FileOutputStream(exportFile)) {
+            outputStream.write(transcript.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private void deleteStaleSharedFiles(File shareDirectory) {
+        File[] files = shareDirectory.listFiles();
+        if (files == null) {
+            return;
+        }
+        for (File file : files) {
+            if (file != null && file.isFile()) {
+                file.delete();
+            }
+        }
+    }
+
     private void updateButtons() {
         micButton.setText(recording ? R.string.button_stop : R.string.button_start);
         copyButton.setEnabled(!recording && !latestTranscript.trim().isEmpty());
+        if (shareButton != null) {
+            shareButton.setEnabled(!recording && !latestTranscript.trim().isEmpty());
+        }
+        if (exportButton != null) {
+            exportButton.setEnabled(!recording && !latestTranscript.trim().isEmpty());
+        }
         newButton.setEnabled(!recording);
         if (selectButton != null && localStore != null) {
             selectButton.setEnabled(!recording && !localStore.getNonEmptySlots().isEmpty());

@@ -24,6 +24,12 @@
             android:name=".TranscriptionService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <provider
+            android:name=".ShareAttachmentProvider"
+            android:authorities="com.example.realtimetranscriber.shareprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 
 </manifest>
