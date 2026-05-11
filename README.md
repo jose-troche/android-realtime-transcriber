@@ -17,7 +17,7 @@ The app targets Android API 35.
 - Up to 10 transcriptions are stored locally in a circular `SharedPreferences` buffer.
 - Active recording runs in a foreground microphone service while the screen is locked or another app is open.
 - In-progress words are preserved more reliably when Android interrupts and restarts recognition during app switches or lock/screen-saver transitions.
-- Background recording stops after 3 hours outside the foreground.
+- Background recording continues until the user taps Stop.
 
 ## Speech Recognition
 
@@ -121,7 +121,7 @@ Some Android builds do not expose offline recognition to third-party apps, even 
 - Delete while stopped removes the active transcript.
 - Lock the phone or switch apps while recording; transcription continues with the foreground service notification active.
 - Speak during an app switch or lock/unlock transition and confirm words are not dropped when recognition restarts.
-- Leave recording in the background for 3 hours; it stops automatically.
+- Leave recording in the background for an extended period and confirm it continues until you tap Stop.
 
 ## Logs
 

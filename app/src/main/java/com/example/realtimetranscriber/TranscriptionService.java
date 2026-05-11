@@ -14,7 +14,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -32,7 +31,6 @@ public class TranscriptionService extends Service {
     private static final long RESTART_DELAY_MS = 350L;
     private static final long MAX_RESTART_DELAY_MS = 5000L;
     private static final long STOP_FLUSH_TIMEOUT_MS = 1500L;
-    private static final long MAX_BACKGROUND_RECORDING_MS = 3L * 60L * 60L * 1000L;
 
     private final IBinder binder = new LocalBinder();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -45,11 +43,9 @@ public class TranscriptionService extends Service {
     private boolean appInForeground;
     private boolean manuallyStopping;
     private boolean finalizingStop;
-    private boolean finalizingStopTimedOut;
     private boolean offlineMode;
     private String partialText = "";
     private String status = "Ready";
-    private long backgroundStartedAt = 0L;
     private long recognizerRestartDelayMs = RESTART_DELAY_MS;
 
     public final class LocalBinder extends Binder {
@@ -84,7 +80,7 @@ public class TranscriptionService extends Service {
         } else if (ACTION_START_RECORDING.equals(action)) {
             startRecording();
         } else if (ACTION_STOP_RECORDING.equals(action)) {
-            stopRecording(false);
+            stopRecording();
         }
         return START_STICKY;
     }
@@ -103,13 +99,6 @@ public class TranscriptionService extends Service {
 
     void setAppInForeground(boolean inForeground) {
         appInForeground = inForeground;
-        if (inForeground) {
-            backgroundStartedAt = 0L;
-            mainHandler.removeCallbacks(backgroundStopRunnable);
-            return;
-        }
-        backgroundStartedAt = SystemClock.elapsedRealtime();
-        scheduleBackgroundStop();
     }
 
     String getTranscript() {
@@ -126,7 +115,6 @@ public class TranscriptionService extends Service {
             manuallyStopping = true;
             stopRecognizer();
             stopForegroundCompat();
-            mainHandler.removeCallbacks(backgroundStopRunnable);
         }
         store.startNewTranscription();
         committedText.setLength(0);
@@ -155,25 +143,17 @@ public class TranscriptionService extends Service {
         status = "Listening online";
         startForeground(NOTIFICATION_ID, buildNotification("Listening online"));
         startRecognizer();
-        if (!appInForeground) {
-            if (backgroundStartedAt == 0L) {
-                backgroundStartedAt = SystemClock.elapsedRealtime();
-            }
-            scheduleBackgroundStop();
-        }
         notifyStateChanged();
     }
 
-    void stopRecording(boolean timedOut) {
-        if (!recording && !timedOut) {
+    void stopRecording() {
+        if (!recording) {
             return;
         }
         recording = false;
         manuallyStopping = true;
         finalizingStop = true;
-        finalizingStopTimedOut = timedOut;
-        status = timedOut ? "Finishing background transcription" : "Finishing transcription";
-        mainHandler.removeCallbacks(backgroundStopRunnable);
+        status = "Finishing transcription";
         notifyStateChanged();
         flushRecognizerBeforeStop();
     }
@@ -348,7 +328,7 @@ public class TranscriptionService extends Service {
             }
             if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                 partialText = "";
-                stopRecording(false);
+                stopRecording();
                 status = "Microphone permission is required";
                 notifyStateChanged();
                 return;
@@ -511,9 +491,8 @@ public class TranscriptionService extends Service {
         commitPartialText();
         persistCommittedTranscript();
         destroyRecognizerNow();
-        status = finalizingStopTimedOut ? "Stopped after 3 hours in background" : "Paused";
+        status = "Paused";
         finalizingStop = false;
-        finalizingStopTimedOut = false;
         stopForegroundCompat();
         notifyStateChanged();
         stopSelfIfIdle();
@@ -541,23 +520,6 @@ public class TranscriptionService extends Service {
                 || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 && error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED);
     }
-
-    private void scheduleBackgroundStop() {
-        mainHandler.removeCallbacks(backgroundStopRunnable);
-        if (recording && !appInForeground) {
-            mainHandler.postDelayed(backgroundStopRunnable, MAX_BACKGROUND_RECORDING_MS);
-        }
-    }
-
-    private final Runnable backgroundStopRunnable = new Runnable() {
-        @Override
-        public void run() {
-            long elapsed = backgroundStartedAt == 0L ? 0L : SystemClock.elapsedRealtime() - backgroundStartedAt;
-            if (recording && !appInForeground && elapsed >= MAX_BACKGROUND_RECORDING_MS) {
-                stopRecording(true);
-            }
-        }
-    };
 
     private Notification buildNotification(String text) {
         Intent activityIntent = new Intent(this, MainActivity.class);
